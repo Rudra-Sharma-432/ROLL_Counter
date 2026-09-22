@@ -31,16 +31,43 @@
 
   <!-- CAMERA SCREEN -->
   <section id="screen-camera" class="screen">
+    <div class="mode-toggle">
+      <button id="mode-single" class="mode-btn active" type="button">Single photo</button>
+      <button id="mode-panorama" class="mode-btn" type="button">Panorama</button>
+    </div>
+
     <div class="camera-frame">
       <video id="camera-preview" playsinline autoplay muted></video>
       <canvas id="capture-canvas" class="hidden"></canvas>
     </div>
     <button id="take-photo" class="btn-primary">Take photo</button>
+
+    <p id="pano-info" class="status-line hidden"></p>
+    <button id="pano-finish" class="btn-secondary hidden">Align &amp; combine</button>
+
     <div class="session-line">
       <span>Photos added: <strong id="cam-photo-count">0</strong></span>
       <span>Total: <strong id="cam-total">0</strong></span>
     </div>
     <button id="cancel-camera" class="btn-text">Cancel</button>
+  </section>
+
+  <!-- PANORAMA ALIGN SCREEN -->
+  <section id="screen-align" class="screen">
+    <header class="brand">
+      <h1>Line them up</h1>
+      <p class="brand-sub">Drag the new photo so it overlaps the one below, then confirm.</p>
+    </header>
+
+    <div class="align-frame" id="align-frame">
+      <img id="align-base" class="align-layer" alt="">
+      <img id="align-overlay" class="align-layer" alt="">
+    </div>
+
+    <div class="review-actions">
+      <button id="align-reset" class="btn-secondary">Reset position</button>
+      <button id="align-confirm" class="btn-primary">Confirm</button>
+    </div>
   </section>
 
   <!-- REVIEW SCREEN -->
