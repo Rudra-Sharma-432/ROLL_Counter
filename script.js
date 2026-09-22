@@ -27,7 +27,7 @@
     try { return localStorage.getItem(key); } catch (e) { return null; }
   }
   function safeSet(key, val) {
-    try { localStorage.setItem(key, val); } catch (e) {}
+    try { localStorage.setItem(key, val); } catch (e) { }
   }
 
   const saved = safeGet('rollcount-total');
@@ -118,19 +118,82 @@
     controls.style.display = 'none';
     inReview = true;
 
-    modelStatus.textContent = 'scanning photo…';
     modelStatus.classList.add('show');
-
-    const predictions = await model.detect(canvas);
+    boxes = await runTiledScan(canvas);
     modelStatus.classList.remove('show');
-
-    boxes = predictions
-      .filter(p => p.class === 'person' && p.score > 0.4)
-      .map(p => ({ x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3], manual: false }));
 
     drawBoxes();
     reviewBar.classList.add('show');
   });
+
+  // A single full-classroom photo shrinks each student to a tiny cluster of
+  // pixels, which the detector misses. Instead, slice the photo into a grid
+  // of overlapping tiles, upscale each tile, and detect people tile-by-tile
+  // at effectively higher zoom, then merge results across tile boundaries.
+  async function runTiledScan(fullCanvas) {
+    const cols = 3, rows = 3, overlap = 0.15;
+    const fw = fullCanvas.width, fh = fullCanvas.height;
+    const tileW = fw / cols, tileH = fh / rows;
+    const overlapW = tileW * overlap, overlapH = tileH * overlap;
+    const totalTiles = cols * rows;
+    let allBoxes = [];
+    let tileIndex = 0;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        tileIndex++;
+        modelStatus.textContent = `scanning section ${tileIndex}/${totalTiles}…`;
+
+        const sx = Math.max(0, c * tileW - overlapW);
+        const sy = Math.max(0, r * tileH - overlapH);
+        const ex = Math.min(fw, (c + 1) * tileW + overlapW);
+        const ey = Math.min(fh, (r + 1) * tileH + overlapH);
+        const sw = ex - sx, sh = ey - sy;
+
+        const scale = Math.max(1, 640 / Math.min(sw, sh));
+        const tileCanvas = document.createElement('canvas');
+        tileCanvas.width = sw * scale;
+        tileCanvas.height = sh * scale;
+        const tctx = tileCanvas.getContext('2d');
+        tctx.drawImage(fullCanvas, sx, sy, sw, sh, 0, 0, tileCanvas.width, tileCanvas.height);
+
+        const preds = await model.detect(tileCanvas);
+        preds
+          .filter(p => p.class === 'person' && p.score > 0.35)
+          .forEach(p => {
+            const [bx, by, bw, bh] = p.bbox;
+            allBoxes.push({
+              x: sx + bx / scale,
+              y: sy + by / scale,
+              w: bw / scale,
+              h: bh / scale,
+              score: p.score,
+              manual: false
+            });
+          });
+      }
+    }
+    return mergeOverlappingBoxes(allBoxes);
+  }
+
+  function boxIou(a, b) {
+    const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+    const x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
+    const iw = Math.max(0, x2 - x1), ih = Math.max(0, y2 - y1);
+    const inter = iw * ih;
+    const union = a.w * a.h + b.w * b.h - inter;
+    return union <= 0 ? 0 : inter / union;
+  }
+
+  function mergeOverlappingBoxes(list) {
+    const sorted = list.slice().sort((a, b) => b.score - a.score);
+    const kept = [];
+    for (const box of sorted) {
+      const isDuplicate = kept.some(k => boxIou(box, k) > 0.3);
+      if (!isDuplicate) kept.push(box);
+    }
+    return kept;
+  }
 
   function drawBoxes() {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height); // repaint frame under boxes

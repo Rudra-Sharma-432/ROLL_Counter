@@ -5,11 +5,13 @@ big tally button (with undo), or use the camera-based photo scan to get an
 AI-suggested count you can correct before adding it to the total.
 
 ## Files
+
 - `index.html` — page structure
 - `style.css` — all styling
 - `script.js` — camera access, tally logic, and the AI photo-scan mode
 
 ## Host it on GitHub Pages
+
 1. Create a new GitHub repo and upload these three files to the root
    (not inside a subfolder).
 2. Go to the repo's **Settings → Pages**.
