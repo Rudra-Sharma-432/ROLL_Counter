@@ -1,8 +1,10 @@
 // ============================================================
-// PHASE 4: High-res capture + manual-align panorama mode.
-// Single photo: capture -> detect -> review -> add to total.
-// Panorama: capture N overlapping frames -> drag-align each on
-// top of the last -> composite into one wide image -> detect once.
+// PHASE 5: Automatic panorama alignment.
+// Capture is still manual (you choose what to photograph), but the
+// overlap between consecutive frames is now found automatically via
+// a block-matching search (minimising pixel difference over the
+// overlap region) instead of requiring you to drag it by hand.
+// You can still nudge the result if the auto-guess isn't perfect.
 // ============================================================
 
 import {
@@ -16,6 +18,8 @@ const state = {
   cameraStream: null,
   imageCapture: null,    // ImageCapture, if the browser supports full-res stills
   lastDetectedCount: 0,  // raw AI count for the photo currently in review
+  reviewReturnScreen: "screen-camera", // where Retake/Add-to-total send you back to
+  uploadQueue: [],        // canvases from an upload still waiting to be reviewed
 
   // panorama session
   panoMode: false,
@@ -23,6 +27,7 @@ const state = {
   alignBaseCanvas: null,  // combined-so-far canvas while aligning
   alignIndex: 0,          // index into panoFrames currently being aligned
   alignScale: 1,          // display px -> natural px factor for current align step
+  alignAutoPos: { x: 0, y: 0 }, // last auto-computed display-space position, for Reset
   drag: { active: false, startX: 0, startY: 0, baseX: 0, baseY: 0, x: 0, y: 0 },
 };
 
@@ -37,6 +42,10 @@ const camTotalEl = document.getElementById("cam-total");
 const takePhotoBtn = document.getElementById("take-photo");
 const reviewCanvas = document.getElementById("review-canvas");
 const reviewNumberEl = document.getElementById("review-number");
+const retakeBtn = document.getElementById("retake-photo");
+
+const uploadInput = document.getElementById("upload-input");
+const uploadPhotoBtn = document.getElementById("upload-photo");
 
 const modeSingleBtn = document.getElementById("mode-single");
 const modePanoBtn = document.getElementById("mode-panorama");
@@ -70,6 +79,7 @@ document.getElementById("home-minus").addEventListener("click", () => {
 async function initDetector() {
   takePhotoBtn.disabled = true;
   takePhotoBtn.textContent = "Loading detector…";
+  uploadPhotoBtn.disabled = true;
 
   try {
     const vision = await FilesetResolver.forVisionTasks(
@@ -89,8 +99,10 @@ async function initDetector() {
 
     takePhotoBtn.disabled = false;
     takePhotoBtn.textContent = "Take photo";
+    uploadPhotoBtn.disabled = false;
   } catch (err) {
     takePhotoBtn.textContent = "Detector failed to load";
+    uploadPhotoBtn.disabled = true;
     console.error("MediaPipe load error:", err);
   }
 }
@@ -119,6 +131,7 @@ async function startCamera() {
 
     state.cameraStream = stream;
     videoEl.srcObject = stream;
+    state.reviewReturnScreen = "screen-camera";
 
     // Some browsers (mainly Android Chrome) expose ImageCapture, which
     // can grab a full sensor-resolution still - sharper than the video
@@ -185,7 +198,64 @@ async function captureFrameCanvas() {
   return canvas;
 }
 
-// ---- Run face detection on a canvas, draw boxes on it, show review ----
+// ---- Load an uploaded file as a full-resolution canvas ----
+async function loadFileAsCanvas(file) {
+  const bitmap = await createImageBitmap(file);
+  // Cap extreme resolutions so huge phone photos don't stall weaker devices.
+  const MAX_DIM = 4096;
+  const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
+  const w = Math.round(bitmap.width * scale);
+  const h = Math.round(bitmap.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+  return canvas;
+}
+
+function processNextUpload() {
+  if (state.uploadQueue.length === 0) {
+    showScreen(state.reviewReturnScreen);
+    return;
+  }
+  const canvas = state.uploadQueue.shift();
+  setReviewOrigin("upload");
+  detectAndShowReview(canvas);
+}
+
+uploadPhotoBtn.addEventListener("click", () => uploadInput.click());
+
+uploadInput.addEventListener("change", async () => {
+  const files = Array.from(uploadInput.files || []);
+  uploadInput.value = ""; // allow re-selecting the same file later
+
+  if (!faceDetector) {
+    cameraStatusEl.textContent = "Still loading the detector — try again in a second.";
+    return;
+  }
+  if (files.length === 0) return;
+
+  cameraStatusEl.textContent = "";
+  const canvases = [];
+  for (const file of files) {
+    try {
+      canvases.push(await loadFileAsCanvas(file));
+    } catch (err) {
+      console.warn("Couldn't read uploaded file:", err);
+    }
+  }
+  if (canvases.length === 0) return;
+
+  state.uploadQueue = canvases;
+  state.reviewReturnScreen = "screen-home";
+  processNextUpload();
+});
+
+
+function setReviewOrigin(origin) {
+  retakeBtn.textContent = origin === "upload" ? "Skip" : "Retake";
+}
+
 function detectAndShowReview(canvas) {
   const ctx = canvas.getContext("2d");
   const result = faceDetector.detect(canvas);
@@ -244,6 +314,7 @@ async function takePhoto() {
         panoFinishBtn.classList.remove("hidden");
       }
     } else {
+      setReviewOrigin("camera");
       detectAndShowReview(canvas);
     }
   } finally {
@@ -252,6 +323,84 @@ async function takePhoto() {
 }
 
 takePhotoBtn.addEventListener("click", takePhoto);
+
+// ---- Automatic alignment (translation-only block matching) ----
+// Downscales both frames to grayscale, then searches for the (dx, dy)
+// pixel offset that makes the overlapping region match best. This
+// assumes the pan between frames is close to pure horizontal/vertical
+// translation, which holds well enough for a phone panned across a
+// room at a normal distance.
+function toGrayDownscaled(canvas, targetMaxDim) {
+  const scale = targetMaxDim / Math.max(canvas.width, canvas.height);
+  const w = Math.max(1, Math.round(canvas.width * scale));
+  const h = Math.max(1, Math.round(canvas.height * scale));
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(canvas, 0, 0, w, h);
+  const { data } = ctx.getImageData(0, 0, w, h);
+  const gray = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+  return { gray, w, h, scale };
+}
+
+function autoAlign(baseCanvas, overlayCanvas, guessDxNatural, guessDyNatural) {
+  const MAX_DIM = 220;
+  const base = toGrayDownscaled(baseCanvas, MAX_DIM);
+  const overlay = toGrayDownscaled(overlayCanvas, MAX_DIM);
+  const scale = base.scale; // same scale used for both (same source resolution)
+
+  function scoreAt(dx, dy) {
+    const x0 = Math.max(0, dx);
+    const y0 = Math.max(0, dy);
+    const x1 = Math.min(base.w, dx + overlay.w);
+    const y1 = Math.min(base.h, dy + overlay.h);
+    if (x1 - x0 < overlay.w * 0.15 || y1 - y0 < overlay.h * 0.5) return Infinity;
+
+    let sum = 0;
+    let count = 0;
+    const step = 2;
+    for (let y = y0; y < y1; y += step) {
+      const by = Math.floor(y) * base.w;
+      const oy = Math.floor(y - dy) * overlay.w;
+      for (let x = x0; x < x1; x += step) {
+        const diff = base.gray[by + Math.floor(x)] - overlay.gray[oy + Math.floor(x - dx)];
+        sum += diff * diff;
+        count++;
+      }
+    }
+    return count ? sum / count : Infinity;
+  }
+
+  let cx = guessDxNatural * scale;
+  let cy = guessDyNatural * scale;
+  const passes = [
+    { span: Math.max(base.w, base.h) * 0.3, step: 8 },
+    { span: 16, step: 2 },
+    { span: 4, step: 1 },
+  ];
+
+  let best = { dx: cx, dy: cy, score: Infinity };
+  for (const pass of passes) {
+    let passBest = { dx: cx, dy: cy, score: scoreAt(cx, cy) };
+    for (let dy = cy - pass.span; dy <= cy + pass.span; dy += pass.step) {
+      for (let dx = cx - pass.span; dx <= cx + pass.span; dx += pass.step) {
+        const s = scoreAt(dx, dy);
+        if (s < passBest.score) passBest = { dx, dy, score: s };
+      }
+    }
+    cx = passBest.dx;
+    cy = passBest.dy;
+    best = passBest;
+  }
+
+  if (!isFinite(best.score)) return null; // not enough overlap to trust a match
+
+  return { dx: best.dx / scale, dy: best.dy / scale };
+}
 
 // ---- Panorama: align + combine ----
 panoFinishBtn.addEventListener("click", () => {
@@ -281,9 +430,18 @@ function openAlignStep() {
       const overlayDisplayWidth = overlay.width * state.alignScale;
       alignOverlayImg.style.width = overlayDisplayWidth + "px";
 
-      // Initial guess: about 30% overlap with the base's right edge.
-      const startX = displayWidth - overlayDisplayWidth * 0.3;
-      setOverlayPosition(startX, 0);
+      // Heuristic fallback: about 30% overlap with the base's right edge.
+      const guessDx = base.width - overlay.width * 0.3;
+      const guessDy = 0;
+
+      const auto = autoAlign(base, overlay, guessDx, guessDy);
+      const natDx = auto ? auto.dx : guessDx;
+      const natDy = auto ? auto.dy : guessDy;
+
+      const x = natDx * state.alignScale;
+      const y = natDy * state.alignScale;
+      state.alignAutoPos = { x, y };
+      setOverlayPosition(x, y);
     };
   };
 }
@@ -318,9 +476,7 @@ alignOverlayImg.addEventListener("pointermove", (e) => {
 });
 
 document.getElementById("align-reset").addEventListener("click", () => {
-  const displayWidth = alignFrame.clientWidth;
-  const overlayDisplayWidth = parseFloat(alignOverlayImg.style.width);
-  setOverlayPosition(displayWidth - overlayDisplayWidth * 0.3, 0);
+  setOverlayPosition(state.alignAutoPos.x, state.alignAutoPos.y);
 });
 
 document.getElementById("align-confirm").addEventListener("click", () => {
@@ -350,6 +506,7 @@ document.getElementById("align-confirm").addEventListener("click", () => {
     openAlignStep();
   } else {
     // All frames merged - run detection on the finished panorama.
+    setReviewOrigin("camera");
     detectAndShowReview(state.alignBaseCanvas);
     resetPanoramaSession();
   }
@@ -365,8 +522,16 @@ document.getElementById("review-minus").addEventListener("click", () => {
   reviewNumberEl.textContent = Math.max(0, next);
 });
 
+function afterReviewDone() {
+  if (state.uploadQueue.length > 0) {
+    processNextUpload();
+  } else {
+    showScreen(state.reviewReturnScreen);
+  }
+}
+
 document.getElementById("retake-photo").addEventListener("click", () => {
-  showScreen("screen-camera");
+  afterReviewDone();
 });
 
 document.getElementById("add-to-total").addEventListener("click", () => {
@@ -379,7 +544,7 @@ document.getElementById("add-to-total").addEventListener("click", () => {
   camPhotoCountEl.textContent = state.photos.length;
   camTotalEl.textContent = state.total;
 
-  showScreen("screen-camera");
+  afterReviewDone();
 });
 
 renderHome();
