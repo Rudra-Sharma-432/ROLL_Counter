@@ -1,65 +1,84 @@
 <!DOCTYPE html>
 <html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Classroom Counter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
 
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <title>Roll Count</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
-      rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
-  </head>
+  <!-- HOME SCREEN -->
+  <section id="screen-home" class="screen active">
+    <header class="brand">
+      <span class="brand-mark">#</span>
+      <h1>Classroom Counter</h1>
+      <p class="brand-sub">Count students by photo, not by hand.</p>
+    </header>
 
-  <body>
-    <div id="app">
-
-      <div id="camWrap">
-        <video id="video" autoplay muted playsinline></video>
-        <canvas id="shotCanvas"></canvas>
-        <div id="camMessage">
-          <div>
-            <strong>Camera access needed</strong>
-            <span id="camMessageText">Allow camera access, then reload the page. On iPhone, use Safari for this to
-              work.</span>
-          </div>
-        </div>
+    <div class="tally">
+      <span class="tally-label">Total</span>
+      <span id="home-total" class="tally-number">0</span>
+      <div class="tally-controls">
+        <button id="home-minus" class="btn-round" aria-label="Subtract one">&minus;</button>
+        <button id="home-plus" class="btn-round" aria-label="Add one">&plus;</button>
       </div>
-
-      <div id="modelStatus">loading detector…</div>
-
-      <div id="hud">
-        <div id="counterBox">
-          <p id="counterLabel">students counted</p>
-          <div id="counterNumber">0</div>
-        </div>
-        <button id="resetBtn" class="roundBtn">Reset</button>
-      </div>
-
-      <div id="controls">
-        <p id="hint">Tap the big button once per student. Missed one? Undo takes back the last tap.</p>
-        <div id="row">
-          <button id="undoBtn" class="roundBtn" aria-label="Undo last tap">↺</button>
-          <button id="tapBtn" class="roundBtn" aria-label="Count one student">+1</button>
-          <button id="scanBtn" class="roundBtn" aria-label="Scan a photo instead">📷</button>
-        </div>
-      </div>
-
-      <div id="reviewBar">
-        <p id="reviewText">Found <strong id="foundCount">0</strong> in this photo. Tap a box to remove it, tap empty
-          space to mark someone the scan missed.</p>
-        <div id="reviewRow">
-          <button id="discardBtn" class="pill">Discard</button>
-          <button id="confirmBtn" class="pill">Add to total</button>
-        </div>
-      </div>
-
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
-    <script src="script.js"></script>
-  </body>
+    <button id="start-camera" class="btn-primary">Start camera</button>
+    <p id="camera-status" class="status-line"></p>
+  </section>
 
+  <!-- CAMERA SCREEN -->
+  <section id="screen-camera" class="screen">
+    <div class="camera-frame">
+      <video id="camera-preview" playsinline autoplay muted></video>
+      <canvas id="capture-canvas" class="hidden"></canvas>
+    </div>
+    <button id="take-photo" class="btn-primary">Take photo</button>
+    <div class="session-line">
+      <span>Photos added: <strong id="cam-photo-count">0</strong></span>
+      <span>Total: <strong id="cam-total">0</strong></span>
+    </div>
+    <button id="cancel-camera" class="btn-text">Cancel</button>
+  </section>
+
+  <!-- REVIEW SCREEN -->
+  <section id="screen-review" class="screen">
+    <div class="camera-frame">
+      <canvas id="review-canvas"></canvas>
+    </div>
+
+    <div class="review-count">
+      <span class="review-label">AI detected</span>
+      <div class="tally-controls">
+        <button id="review-minus" class="btn-round" aria-label="Subtract one">&minus;</button>
+        <span id="review-number" class="tally-number">0</span>
+        <button id="review-plus" class="btn-round" aria-label="Add one">&plus;</button>
+      </div>
+    </div>
+
+    <div class="review-actions">
+      <button id="retake-photo" class="btn-secondary">Retake</button>
+      <button id="add-to-total" class="btn-primary">Add to total</button>
+    </div>
+  </section>
+
+  <!-- FINAL SCREEN -->
+  <section id="screen-final" class="screen">
+    <header class="brand">
+      <h1>Classroom count</h1>
+    </header>
+
+    <div class="tally">
+      <span id="final-total" class="tally-number">0</span>
+    </div>
+
+    <ul id="final-breakdown" class="breakdown"></ul>
+
+    <button id="new-count" class="btn-primary">New count</button>
+  </section>
+
+  <script src="app.js"></script>
+</body>
 </html>
