@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Roll Count</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <div id="camWrap">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="shotCanvas"></canvas>
+    <div id="camMessage">
+      <div>
+        <strong>Camera access needed</strong>
+        <span id="camMessageText">Allow camera access, then reload the page. On iPhone, use Safari for this to work.</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="modelStatus">loading detector…</div>
+
+  <div id="hud">
+    <div id="counterBox">
+      <p id="counterLabel">students counted</p>
+      <div id="counterNumber">0</div>
+    </div>
+    <button id="resetBtn" class="roundBtn">Reset</button>
+  </div>
+
+  <div id="controls">
+    <p id="hint">Tap the big button once per student. Missed one? Undo takes back the last tap.</p>
+    <div id="row">
+      <button id="undoBtn" class="roundBtn" aria-label="Undo last tap">↺</button>
+      <button id="tapBtn" class="roundBtn" aria-label="Count one student">+1</button>
+      <button id="scanBtn" class="roundBtn" aria-label="Scan a photo instead">📷</button>
+    </div>
+  </div>
+
+  <div id="reviewBar">
+    <p id="reviewText">Found <strong id="foundCount">0</strong> in this photo. Tap a box to remove it, tap empty space to mark someone the scan missed.</p>
+    <div id="reviewRow">
+      <button id="discardBtn" class="pill">Discard</button>
+      <button id="confirmBtn" class="pill">Add to total</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
