@@ -19,7 +19,6 @@
 
   let total = 0;
   const history = []; // stack of {delta} for undo
-  let model = null;
   let boxes = [];      // current review-mode detections {x,y,w,h,manual}
   let inReview = false;
 
@@ -49,11 +48,7 @@
   }
 
   tapBtn.addEventListener('click', () => addCount(1));
-  undoBtn.addEventListener('click', () => {
-    const last = history.pop();
-    if (last !== undefined) addCount(-last - (history.length ? 0 : 0)); // simple decrement
-  });
-  // simpler, correct undo: pop last delta and subtract it directly
+
   undoBtn.onclick = () => {
     const last = history.pop();
     if (last === undefined) return;
@@ -92,44 +87,137 @@
   }
   startCamera();
 
-  // ---------------- AI-assisted scan mode ----------------
-  modelStatus.classList.add('show');
-  cocoSsd.load().then(m => {
-    model = m;
-    modelStatus.classList.remove('show');
-  }).catch(() => {
-    modelStatus.textContent = 'detector unavailable — manual mode still works';
-    setTimeout(() => modelStatus.classList.remove('show'), 3000);
-  });
+  // ---------------- Face detector (yolov8n-face, ONNX Runtime Web) ----------------
+  // Model: WIDERFACE-trained YOLOv8n-face, single class (face), 640x640 input.
+  // Hosted as a GitHub Release asset (stable, CORS-open, no account needed).
+  const MODEL_URL = 'https://github.com/yakhyo/yolov8-face-onnx-inference/releases/download/weights/yolov8n-face.onnx';
+  const MODEL_INPUT_SIZE = 640;
+  const CONF_THRESHOLD = 0.35;
+  const IOU_THRESHOLD = 0.45;
 
-  scanBtn.addEventListener('click', async () => {
-    if (!model) {
-      hint.textContent = 'Detector still loading, one moment…';
-      return;
-    }
-    if (!video.videoWidth) return;
+  let session = null;
+  let modelLoadPromise = null;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    video.classList.add('hidden');
-    canvas.style.display = 'block';
-    controls.style.display = 'none';
-    inReview = true;
-
+  function loadModel() {
+    if (modelLoadPromise) return modelLoadPromise;
+    modelStatus.textContent = 'loading detector…';
     modelStatus.classList.add('show');
-    boxes = await runTiledScan(canvas);
-    modelStatus.classList.remove('show');
+    ort.env.wasm.numThreads = 1; // safest default across phone browsers
+    modelLoadPromise = ort.InferenceSession.create(MODEL_URL, {
+      executionProviders: ['wasm']
+    }).then(s => {
+      session = s;
+      modelStatus.classList.remove('show');
+      return s;
+    }).catch(err => {
+      console.error('Model load failed:', err);
+      modelStatus.textContent = 'detector unavailable — manual mode still works';
+      setTimeout(() => modelStatus.classList.remove('show'), 3500);
+      throw err;
+    });
+    return modelLoadPromise;
+  }
+  loadModel();
 
-    drawBoxes();
-    reviewBar.classList.add('show');
-  });
+  // Letterbox-resize a source canvas region into a square MODEL_INPUT_SIZE canvas,
+  // returning the canvas plus the scale/offset needed to map detections back.
+  function letterbox(srcCanvas, sx, sy, sw, sh) {
+    const size = MODEL_INPUT_SIZE;
+    const scale = Math.min(size / sw, size / sh);
+    const newW = Math.round(sw * scale);
+    const newH = Math.round(sh * scale);
+    const padX = Math.floor((size - newW) / 2);
+    const padY = Math.floor((size - newH) / 2);
 
-  // A single full-classroom photo shrinks each student to a tiny cluster of
-  // pixels, which the detector misses. Instead, slice the photo into a grid
-  // of overlapping tiles, upscale each tile, and detect people tile-by-tile
-  // at effectively higher zoom, then merge results across tile boundaries.
+    const out = document.createElement('canvas');
+    out.width = size;
+    out.height = size;
+    const octx = out.getContext('2d');
+    octx.fillStyle = '#727272';
+    octx.fillRect(0, 0, size, size);
+    octx.drawImage(srcCanvas, sx, sy, sw, sh, padX, padY, newW, newH);
+
+    return { canvas: out, scale, padX, padY };
+  }
+
+  function canvasToTensor(c) {
+    const size = MODEL_INPUT_SIZE;
+    const imgData = c.getContext('2d').getImageData(0, 0, size, size).data;
+    const float32 = new Float32Array(3 * size * size);
+    const plane = size * size;
+    for (let i = 0; i < plane; i++) {
+      const off = i * 4;
+      float32[i] = imgData[off] / 255;               // R
+      float32[plane + i] = imgData[off + 1] / 255;    // G
+      float32[2 * plane + i] = imgData[off + 2] / 255;// B
+    }
+    return new ort.Tensor('float32', float32, [1, 3, size, size]);
+  }
+
+  // Decode YOLOv8 single-class output: shape [1, 5, 8400] -> (cx, cy, w, h, conf) per anchor.
+  function decodeOutput(output, letter, offsetX, offsetY) {
+    const data = output.data;
+    const numAnchors = output.dims[2];
+    const results = [];
+    for (let i = 0; i < numAnchors; i++) {
+      const conf = data[4 * numAnchors + i];
+      if (conf < CONF_THRESHOLD) continue;
+      const cx = data[0 * numAnchors + i];
+      const cy = data[1 * numAnchors + i];
+      const w = data[2 * numAnchors + i];
+      const h = data[3 * numAnchors + i];
+
+      // undo letterbox padding/scale, then map tile -> full-photo coords
+      const fx = (cx - letter.padX) / letter.scale;
+      const fy = (cy - letter.padY) / letter.scale;
+      const fw = w / letter.scale;
+      const fh = h / letter.scale;
+
+      results.push({
+        x: offsetX + fx - fw / 2,
+        y: offsetY + fy - fh / 2,
+        w: fw,
+        h: fh,
+        score: conf,
+        manual: false
+      });
+    }
+    return results;
+  }
+
+  function boxIou(a, b) {
+    const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+    const x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
+    const iw = Math.max(0, x2 - x1), ih = Math.max(0, y2 - y1);
+    const inter = iw * ih;
+    const union = a.w * a.h + b.w * b.h - inter;
+    return union <= 0 ? 0 : inter / union;
+  }
+
+  function nms(list, iouThresh) {
+    const sorted = list.slice().sort((a, b) => b.score - a.score);
+    const kept = [];
+    for (const box of sorted) {
+      const isDuplicate = kept.some(k => boxIou(box, k) > iouThresh);
+      if (!isDuplicate) kept.push(box);
+    }
+    return kept;
+  }
+
+  async function detectFacesInRegion(fullCanvas, sx, sy, sw, sh) {
+    const letter = letterbox(fullCanvas, sx, sy, sw, sh);
+    const tensor = canvasToTensor(letter.canvas);
+    const feeds = {};
+    feeds[session.inputNames[0]] = tensor;
+    const outMap = await session.run(feeds);
+    const output = outMap[session.outputNames[0]];
+    return decodeOutput(output, letter, sx, sy);
+  }
+
+  // A single full-classroom photo shrinks each face to a handful of pixels,
+  // which the detector misses even at 640px input. So we slice the photo into
+  // a grid of overlapping tiles and run detection on each tile at effectively
+  // higher zoom, then merge results across tile boundaries with NMS.
   async function runTiledScan(fullCanvas) {
     const cols = 3, rows = 3, overlap = 0.15;
     const fw = fullCanvas.width, fh = fullCanvas.height;
@@ -150,54 +238,51 @@
         const ey = Math.min(fh, (r + 1) * tileH + overlapH);
         const sw = ex - sx, sh = ey - sy;
 
-        const scale = Math.max(1, 640 / Math.min(sw, sh));
-        const tileCanvas = document.createElement('canvas');
-        tileCanvas.width = sw * scale;
-        tileCanvas.height = sh * scale;
-        const tctx = tileCanvas.getContext('2d');
-        tctx.drawImage(fullCanvas, sx, sy, sw, sh, 0, 0, tileCanvas.width, tileCanvas.height);
-
-        const preds = await model.detect(tileCanvas);
-        preds
-          .filter(p => p.class === 'person' && p.score > 0.35)
-          .forEach(p => {
-            const [bx, by, bw, bh] = p.bbox;
-            allBoxes.push({
-              x: sx + bx / scale,
-              y: sy + by / scale,
-              w: bw / scale,
-              h: bh / scale,
-              score: p.score,
-              manual: false
-            });
-          });
+        const tileBoxes = await detectFacesInRegion(fullCanvas, sx, sy, sw, sh);
+        allBoxes = allBoxes.concat(tileBoxes);
       }
     }
-    return mergeOverlappingBoxes(allBoxes);
+    return nms(allBoxes, IOU_THRESHOLD);
   }
 
-  function boxIou(a, b) {
-    const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
-    const x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
-    const iw = Math.max(0, x2 - x1), ih = Math.max(0, y2 - y1);
-    const inter = iw * ih;
-    const union = a.w * a.h + b.w * b.h - inter;
-    return union <= 0 ? 0 : inter / union;
-  }
+  scanBtn.addEventListener('click', async () => {
+    if (!video.videoWidth) return;
 
-  function mergeOverlappingBoxes(list) {
-    const sorted = list.slice().sort((a, b) => b.score - a.score);
-    const kept = [];
-    for (const box of sorted) {
-      const isDuplicate = kept.some(k => boxIou(box, k) > 0.3);
-      if (!isDuplicate) kept.push(box);
+    if (!session) {
+      hint.textContent = 'Detector still loading, one moment…';
+      try {
+        await loadModel();
+      } catch (e) {
+        hint.textContent = 'Detector failed to load — check your connection and try again.';
+        return;
+      }
     }
-    return kept;
-  }
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    video.classList.add('hidden');
+    canvas.style.display = 'block';
+    controls.style.display = 'none';
+    inReview = true;
+
+    modelStatus.classList.add('show');
+    try {
+      boxes = await runTiledScan(canvas);
+    } catch (e) {
+      console.error('Scan failed:', e);
+      boxes = [];
+      hint.textContent = 'Scan failed — you can still mark faces manually below.';
+    }
+    modelStatus.classList.remove('show');
+
+    drawBoxes();
+    reviewBar.classList.add('show');
+  });
 
   function drawBoxes() {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height); // repaint frame under boxes
-    // wait: video may be hidden but still has current frame data; safe to draw from video element
     const scaleFont = Math.max(14, canvas.width / 40);
     boxes.forEach((b, i) => {
       ctx.strokeStyle = b.manual ? '#e8b04b' : '#6fa98a';
@@ -228,7 +313,7 @@
       }
     }
     // otherwise add a manual mark centered on tap
-    const size = canvas.width / 12;
+    const size = canvas.width / 16; // faces are smaller than the old body boxes
     boxes.push({ x: x - size / 2, y: y - size / 2, w: size, h: size, manual: true });
     drawBoxes();
   });
